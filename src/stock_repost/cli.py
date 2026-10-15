@@ -48,7 +48,12 @@ def main() -> int:
         for e in v_res.entries:
             dr = str(e.debit) if e.debit > 0 else "-"
             cr = str(e.credit) if e.credit > 0 else "-"
-            print(f"{e.account:<35} {dr:>12} {cr:>12}")
+            account_display = (
+                f"{e.account} ({e.item})"
+                if e.account == "Stock In Hand" and e.item
+                else e.account
+            )
+            print(f"{account_display:<35} {dr:>12} {cr:>12}")
         print("-" * 62)
         print(
             f"{'Total':<35} "

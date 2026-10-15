@@ -95,6 +95,14 @@ class StockLedger:
         val = self._dirty_ranges.get((item, warehouse))
         return val[1] if val is not None else None
 
+    def dirty_ranges(self) -> dict[tuple[str, str], tuple[datetime, datetime]]:
+        """Return a copy of all pending dirty ranges across all keys.
+
+        Returns:
+            Mapping of (item, warehouse) to (min_dirty, max_dirty) datetimes.
+        """
+        return dict(self._dirty_ranges)
+
     def clear_dirty(self, item: str, warehouse: str) -> None:
         """Clear all pending dirty marks for the given item and warehouse.
 

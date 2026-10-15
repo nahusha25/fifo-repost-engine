@@ -216,6 +216,41 @@ class _WorkQueue:
         return False
 
 
+def _enqueue(
+    work_queue: _WorkQueue,
+    ledger: StockLedger,
+    item: str,
+    warehouse: str,
+    dt: datetime,
+) -> None:
+    """Enqueue a work item ensuring it starts at or before any pending dirty datetime.
+
+    Pushes at min(dt, ledger.get_min_dirty(item, warehouse) or dt) so that
+    any earlier un-replayed mutations on this item/warehouse key are included.
+    If an earlier entry exists that has never been evaluated (empty snapshot on
+    a non-zero movement), replays from the earliest transaction to establish
+    valid initial layers.
+    """
+    min_dirty = ledger.get_min_dirty(item, warehouse)
+    effective_dt = min(dt, min_dirty) if min_dirty is not None else dt
+
+    prev = ledger.last_before(item, warehouse, effective_dt)
+    if (
+        prev is not None
+        and prev.fifo_snapshot == ()
+        and prev.qty_change != Decimal("0")
+    ):
+        all_key_entries = [
+            e
+            for e in ledger.all_entries()
+            if e.item == item and e.warehouse == warehouse
+        ]
+        if all_key_entries:
+            effective_dt = min(effective_dt, all_key_entries[0].posting_datetime)
+
+    work_queue.push(effective_dt, item, warehouse)
+
+
 class RepostEngine:
     """FIFO stock ledger reposting engine.
 
@@ -269,15 +304,19 @@ class RepostEngine:
             for e in self.ledger.all_entries()
         }
 
-        min_dirty = self.ledger.get_min_dirty(item, warehouse)
-        if min_dirty is not None and min_dirty < from_datetime:
-            start_datetime = min_dirty
-        else:
-            start_datetime = from_datetime
-
         working_ledger = self.ledger.copy()
         work_queue = _WorkQueue()
-        work_queue.push(start_datetime, item, warehouse)
+
+        # Seed the queue with the requested key via the _enqueue helper.
+        _enqueue(work_queue, working_ledger, item, warehouse, from_datetime)
+
+        # Edits to several keys may be batched before one repost.
+        # Seed the queue with every other key currently in the ledger's dirty ranges
+        # so that independent or interdependent multi-key edits are all settled.
+        for (d_item, d_wh), (d_min, _d_max) in working_ledger.dirty_ranges().items():
+            if (d_item, d_wh) != (item, warehouse):
+                _enqueue(work_queue, working_ledger, d_item, d_wh, d_min)
+
         entries_replayed = 0
         reposted_keys: set[tuple[str, str]] = set()
 
@@ -358,10 +397,12 @@ class RepostEngine:
                                     dep, incoming_rate=new_rate
                                 )
                                 working_ledger.replace_entry(dep, updated_dep)
-                                work_queue.push(
-                                    dep.posting_datetime,
+                                _enqueue(
+                                    work_queue,
+                                    working_ledger,
                                     dep.item,
                                     dep.warehouse,
+                                    dep.posting_datetime,
                                 )
 
                 max_dirty = working_ledger.get_max_dirty(cur_item, cur_wh)
