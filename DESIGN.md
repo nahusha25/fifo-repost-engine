@@ -51,7 +51,7 @@ flowchart TD
     D -- No --> H[Pop Earliest Key & Timestamp]
     H --> I[Rewind: Restore FIFO Snapshot Preceding Earliest Timestamp]
     I --> J[Replay Entries Sequentially]
-    J --> K{Has Downstream Dependencies (depends_on)?}
+    J --> K{"Has downstream dependencies (depends_on)?"}
     K -- Yes --> L[Update Downstream Incoming Rate & Mark Downstream Key Dirty]
     L --> M[Enqueue Downstream Key]
     K -- No --> N{Early Stop Conditions Met?}

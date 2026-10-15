@@ -59,7 +59,7 @@ flowchart TD
     CheckQueue -- No --> Pop[Pop Earliest Key & Dirty Timestamp]
     Pop --> Rewind[Restore Clean FIFO Snapshot Preceding Dirty Timestamp]
     Rewind --> Replay[Replay Transactions Sequentially]
-    Replay --> DepCheck{Has Downstream Dependencies (depends_on)?}
+    Replay --> DepCheck{"Has downstream dependencies (depends_on)?"}
     DepCheck -- Yes --> UpdateDep[Update Downstream Incoming Rate & Mark Dirty]
     UpdateDep --> EnqueueDep[Enqueue Downstream Key into Work Queue]
     DepCheck -- No --> GateCheck{Valuation Converged & t > max_dirty?}
