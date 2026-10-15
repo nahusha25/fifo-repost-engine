@@ -41,6 +41,9 @@ Legend: [*] Value Changed   [~] Re-evaluated Only   [ ] Unchanged
 - **Delivery Note DN-01**: Transaction value remains **completely unchanged at -4,000**, while running balance value shifts from **4,000 → 5,000**.
 - **Key Insight**: Under FIFO, `DN-01` (80 units) is satisfied entirely from `OPEN-01` (100 units @ 50). Because `DN-01` never consumed units from `PR-01`, its value does not change. `MFG-01` consumes the remaining 20 units of `OPEN-01` @ 50, all 50 units of `PR-01` @ 80, and 30 units of `PR-02` @ 60, shifting its cost from 5,800 to 6,800 and cascading to `DN-02`.
 
+A standalone visual report is available in [docs/demo.html](docs/demo.html).
+To regenerate: `.venv\Scripts\python examples\generate_demo.py`
+
 ---
 
 ## Repost Algorithm Flowchart
