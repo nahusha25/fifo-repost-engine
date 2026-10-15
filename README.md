@@ -7,7 +7,7 @@
 - **Recalculation**: Rewinds to the clean snapshot before the earliest edit, replays FIFO allocations forward, and propagates raw material consumption values directly to dependent finished goods.
 - **Reposting Design**: Employs a priority queue seeded from dirty ranges, per-entry immutable FIFO snapshots for $O(1)$ rewind, early stopping gated strictly by `max_dirty`, and atomic rollback.
 - **Running Balance Problems on SLE**: Storing running balances on every SLE causes severe write amplification, database locking, concurrency deadlocks, partial failure corruption, snapshot bloat, and GL drift.
-- **Implementation Summary**: A standalone Python 3.11+ library using exact `Decimal` arithmetic, pure `FIFOQueue` operations, immutable dataclasses, atomic `StockLedger`, and automated GL reconciliation.
+- **Implementation Summary**: A standalone Python 3.11+ library using exact `Decimal` arithmetic, pure `FifoQueue` operations, immutable dataclasses, atomic `StockLedger`, and automated GL reconciliation.
 
 ---
 
@@ -59,7 +59,7 @@ flowchart TD
     CheckQueue -- No --> Pop[Pop Earliest Key & Dirty Timestamp]
     Pop --> Rewind[Restore Clean FIFO Snapshot Preceding Dirty Timestamp]
     Rewind --> Replay[Replay Transactions Sequentially]
-    Replay --> DepCheck{Has Outgoing Dependencies?}
+    Replay --> DepCheck{Has Downstream Dependencies (depends_on)?}
     DepCheck -- Yes --> UpdateDep[Update Downstream Incoming Rate & Mark Dirty]
     UpdateDep --> EnqueueDep[Enqueue Downstream Key into Work Queue]
     DepCheck -- No --> GateCheck{Valuation Converged & t > max_dirty?}

@@ -10,8 +10,8 @@ This document details the architectural design, algorithmic decisions, property-
 **How are affected transactions identified when a backdated transaction is edited, inserted, or cancelled?**
 
 When a backdated transaction occurs on item $I$ and warehouse $W$ at timestamp $T$:
-1. **Intra-Key Propagation**: Every subsequent entry for the tuple $(I, W)$ with $\text{posting\_datetime} \ge T$ is potentially affected. Any change in incoming rate, incoming quantity, or stock consumption alters the subsequent FIFO inventory bins and running valuation.
-2. **Inter-Key (Downstream) Propagation**: If any affected transaction on $(I, W)$ is a consumption entry (such as raw material consumed in manufacturing) that has `outgoing_dependencies`, the dependent transactions (e.g., the finished good receipt on $(I_{fg}, W_{fg})$ at $T_{fg}$) are affected. Their incoming rates are recalculated, and all transactions for $(I_{fg}, W_{fg})$ with $\text{posting\_datetime} \ge T_{fg}$ must be recursively re-evaluated.
+1. **Intra-Key Propagation**: Every subsequent entry for the tuple $(I, W)$ with $\text{posting\_datetime} \ge T$ is potentially affected. Any change in incoming rate, incoming quantity, or stock consumption alters subsequent FIFO layers and running valuation.
+2. **Inter-Key (Downstream) Propagation**: If any affected transaction on $(I, W)$ is a consumption entry (such as raw material consumed in manufacturing) that feeds downstream receipts via `depends_on`, the dependent transactions (e.g., the finished good receipt on $(I_{fg}, W_{fg})$ at $T_{fg}$) are affected. Their incoming rates are recalculated, and all transactions for $(I_{fg}, W_{fg})$ with $\text{posting\_datetime} \ge T_{fg}$ must be recursively re-evaluated.
 3. **Dirty Range Tracking**: In our engine, any mutation (`update_entry`, `insert_entry`, `remove_entry`) registers a dirty interval $[\min(\text{dirty}), \max(\text{dirty})]$ on the key. The repost engine seeds its priority queue with all dirty keys, guaranteeing that all directly and indirectly affected transactions are discovered.
 
 ---
@@ -21,17 +21,17 @@ When a backdated transaction occurs on item $I$ and warehouse $W$ at timestamp $
 
 1. **Snapshot Restoration & Queue Replay**:
    - For an affected key $(I, W)$, the engine locates the latest clean entry strictly before $\min(\text{dirty})$.
-   - The engine restores the immutable `FifoBin` queue from that entry's `fifo_snapshot` (or starts with an empty queue if rewinding to the beginning).
+   - The engine restores the immutable `FifoQueue` layers from that entry's `fifo_snapshot` (a tuple of `(qty, rate)` pairs, or starts with an empty queue if rewinding to the beginning).
    - Transactions are replayed sequentially in chronological order (ordered by `(posting_datetime, creation_seq)`).
 2. **Receipt Evaluation**:
-   - Positive quantity entries push new bins: `FifoBin(qty, incoming_rate)`.
+   - Positive quantity entries add new inventory layers via `queue.add(qty, incoming_rate)`.
    - Valuation rate is set to `incoming_rate`, and stock value change is $+ (\text{qty} \times \text{incoming_rate})$.
 3. **Issue / Consumption Evaluation**:
-   - Negative quantity entries consume from the front of the FIFO queue via `FIFOQueue.pop(abs(qty))`.
-   - The output valuation rate is the weighted average of the consumed bins: $\text{rate} = \frac{\sum (q_i \times r_i)}{\sum q_i}$.
+   - Negative quantity entries consume from the front of the FIFO queue via `queue.consume(abs(qty))`.
+   - The output valuation rate is the weighted average of the consumed layers: $\text{rate} = \frac{\sum (q_i \times r_i)}{\sum q_i}$.
    - The stock value change is negative: $- \sum (q_i \times r_i)$.
 4. **Manufacturing Propagation**:
-   - When a consumption entry is tagged with `outgoing_dependencies`, its total consumed valuation $\sum (q_i \times r_i)$ is passed to the manufactured finished good line.
+   - When raw material issues feed a finished good via `depends_on`, their total consumed valuation $\sum (q_i \times r_i)$ is passed to the manufactured finished good line.
    - The finished good's unit `incoming_rate` is updated to $\frac{\text{consumed value}}{\text{manufactured qty}}$.
    - This mutation marks the finished good key dirty at its posting datetime and enqueues it for re-evaluation.
 
@@ -51,7 +51,7 @@ flowchart TD
     D -- No --> H[Pop Earliest Key & Timestamp]
     H --> I[Rewind: Restore FIFO Snapshot Preceding Earliest Timestamp]
     I --> J[Replay Entries Sequentially]
-    J --> K{Has Outgoing Dependencies?}
+    J --> K{Has Downstream Dependencies (depends_on)?}
     K -- Yes --> L[Update Downstream Incoming Rate & Mark Downstream Key Dirty]
     L --> M[Enqueue Downstream Key]
     K -- No --> N{Early Stop Conditions Met?}
@@ -66,7 +66,7 @@ flowchart TD
 
 1. **Work Queue Architecture**: A priority queue holds pending `(posting_datetime, item, warehouse)` tuples, processing the chronologically earliest events first to maintain dependency correctness.
 2. **Snapshot Rewind**: Restores state in $O(1)$ without replaying from epoch, leveraging per-entry immutable snapshots.
-3. **Early Stopping**: Halts re-evaluation when an entry's rate, balance value, and FIFO queue match pre-existing records, **strictly guarded** by $\text{posting\_datetime} > \max(\text{dirty})$.
+3. **Early Stopping**: Halts re-evaluation when all conditions hold: not on the first replayed entry (`i >= 1`), entry strictly after the key's max dirty datetime (`posting_datetime > max_dirty`), FIFO snapshot matches, value_change matches, balance_value matches, and no downstream dependents are pending in the work queue.
 4. **Atomic Commit / Rollback**: All recalculations operate on an isolated `working_ledger`. If an `InsufficientStockError` or negative balance occurs anywhere, the entire working copy is discarded. Dirty marks on the original ledger remain untouched for subsequent inspection or correction.
 
 ---
@@ -96,7 +96,7 @@ flowchart TD
 ### Question 5: Implementation Summary
 
 The `stock_repost` engine is structured into clean, decoupled, single-responsibility modules:
-- **`models.py`**: Immutable dataclasses (`FifoBin`, `StockLedgerEntry`, `GLEntry`, `RepostResult`, `RepostEntryDiff`) utilizing `Decimal` exclusively for all monetary and quantity fields.
+- **`models.py`**: Immutable dataclasses (`StockLedgerEntry`, `GLEntry`, `RepostResult`, `ValueChangedItem`) utilizing `Decimal` exclusively for all monetary and quantity fields.
 - **`fifo.py`**: Pure, in-memory FIFO queue implementation supporting fractional allocations, immutable snapshotting, and strict negative-stock prevention. Performs no I/O.
 - **`ledger.py`**: In-memory stock ledger managing chronological entry indexing, dirty interval tracking (`min_dirty`, `max_dirty`), atomic cloning, and rollback.
 - **`repost.py`**: Core reposting engine featuring multi-key dirty seeding, snapshot rewind, early stopping, manufacturing dependency propagation, and atomic state swaps.
