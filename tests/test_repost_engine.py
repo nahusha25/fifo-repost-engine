@@ -1429,3 +1429,623 @@ class TestLedgerMutationsAndOracle:
 
         assert ledger.all_entries() == full_rebuild(ledger).all_entries()
 
+
+# ========================================================================
+# Phase 3.1: Multiple Edits Before Repost
+# ========================================================================
+
+
+class TestMultipleEditsBeforeRepost:
+    """Tests for coalesced multi-edit scenarios before reposting."""
+
+    def test_two_edits_without_convergence(self) -> None:
+        """Variant 1: Two edits where state does not converge between them.
+
+        Milk ledger with receipts on 10, 20, 28 Jan and issues on 15, 22, 30 Jan.
+        Two rate edits applied before calling repost: 10 Jan receipt to 80 and
+        28 Jan receipt to 90. Calling repost once from the earliest datetime
+        yields identical results under early_stop=True and early_stop=False,
+        and matches full_rebuild.
+        """
+        t_open = datetime(2026, 1, 1, 10, 0)
+        t_pr1 = datetime(2026, 1, 10, 10, 0)
+        t_dn1 = datetime(2026, 1, 15, 10, 0)
+        t_pr2 = datetime(2026, 1, 20, 10, 0)
+        t_dn2 = datetime(2026, 1, 22, 10, 0)
+        t_pr3 = datetime(2026, 1, 28, 10, 0)
+        t_dn3 = datetime(2026, 1, 30, 10, 0)
+
+        entries = [
+            _make_sle(
+                item="Milk",
+                voucher_type="Opening",
+                voucher_no="OPEN-01",
+                posting_datetime=t_open,
+                qty_change=Decimal("100"),
+                incoming_rate=Decimal("50"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-01",
+                posting_datetime=t_pr1,
+                qty_change=Decimal("50"),
+                incoming_rate=Decimal("60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Delivery Note",
+                voucher_no="DN-01",
+                posting_datetime=t_dn1,
+                qty_change=Decimal("-80"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-02",
+                posting_datetime=t_pr2,
+                qty_change=Decimal("50"),
+                incoming_rate=Decimal("60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Delivery Note",
+                voucher_no="DN-02",
+                posting_datetime=t_dn2,
+                qty_change=Decimal("-60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-03",
+                posting_datetime=t_pr3,
+                qty_change=Decimal("50"),
+                incoming_rate=Decimal("60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Delivery Note",
+                voucher_no="DN-03",
+                posting_datetime=t_dn3,
+                qty_change=Decimal("-70"),
+            ),
+        ]
+
+        # Initial repost to establish baseline balances and snapshots
+        base_ledger = StockLedger(entries)
+        base_engine = RepostEngine(base_ledger)
+        base_engine.repost("Milk", "Stores", t_open)
+
+        # Apply two edits before repost: PR-01 to 80, PR-03 to 90
+        ledger_early = base_ledger.copy()
+        dt1_early = ledger_early.update_entry(
+            "PR-01", "Milk", incoming_rate=Decimal("80")
+        )
+        dt2_early = ledger_early.update_entry(
+            "PR-03", "Milk", incoming_rate=Decimal("90")
+        )
+        from_dt_early = min(dt1_early, dt2_early)
+
+        engine_early = RepostEngine(ledger_early)
+        engine_early.repost(
+            "Milk", "Stores", from_dt_early, early_stop=True
+        )
+
+        ledger_full = base_ledger.copy()
+        dt1_full = ledger_full.update_entry(
+            "PR-01", "Milk", incoming_rate=Decimal("80")
+        )
+        dt2_full = ledger_full.update_entry(
+            "PR-03", "Milk", incoming_rate=Decimal("90")
+        )
+        from_dt_full = min(dt1_full, dt2_full)
+
+        engine_full = RepostEngine(ledger_full)
+        engine_full.repost(
+            "Milk", "Stores", from_dt_full, early_stop=False
+        )
+
+        assert ledger_early.all_entries() == ledger_full.all_entries()
+        assert ledger_early.all_entries() == full_rebuild(ledger_early).all_entries()
+
+    def test_second_edit_behind_convergence_point(self) -> None:
+        """Variant 2: Second edit is behind a point where state converges.
+
+        In the Milk ledger, the 10 Jan receipt (+50@60) is fully depleted by the
+        30 Jan issue (-70). An intermediate receipt on 5 Feb (+50@60) therefore
+        converges to the exact prior snapshot and values.
+        A second edit is applied to a later entry on 10 Feb (+50@60 to 90).
+        When reposting from the earliest datetime (10 Jan), early_stop=True
+        triggers at the 5 Feb convergence point, skipping the 10 Feb edit.
+        """
+        t_open = datetime(2026, 1, 1, 10, 0)
+        t_pr1 = datetime(2026, 1, 10, 10, 0)
+        t_dn1 = datetime(2026, 1, 15, 10, 0)
+        t_pr2 = datetime(2026, 1, 20, 10, 0)
+        t_dn2 = datetime(2026, 1, 22, 10, 0)
+        t_pr3 = datetime(2026, 1, 28, 10, 0)
+        t_dn3 = datetime(2026, 1, 30, 10, 0)
+        t_pr4 = datetime(2026, 2, 5, 10, 0)
+        t_pr5 = datetime(2026, 2, 10, 10, 0)
+        t_dn4 = datetime(2026, 2, 15, 10, 0)
+
+        entries = [
+            _make_sle(
+                item="Milk",
+                voucher_type="Opening",
+                voucher_no="OPEN-01",
+                posting_datetime=t_open,
+                qty_change=Decimal("100"),
+                incoming_rate=Decimal("50"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-01",
+                posting_datetime=t_pr1,
+                qty_change=Decimal("50"),
+                incoming_rate=Decimal("60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Delivery Note",
+                voucher_no="DN-01",
+                posting_datetime=t_dn1,
+                qty_change=Decimal("-80"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-02",
+                posting_datetime=t_pr2,
+                qty_change=Decimal("50"),
+                incoming_rate=Decimal("60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Delivery Note",
+                voucher_no="DN-02",
+                posting_datetime=t_dn2,
+                qty_change=Decimal("-60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-03",
+                posting_datetime=t_pr3,
+                qty_change=Decimal("50"),
+                incoming_rate=Decimal("60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Delivery Note",
+                voucher_no="DN-03",
+                posting_datetime=t_dn3,
+                qty_change=Decimal("-70"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-04",
+                posting_datetime=t_pr4,
+                qty_change=Decimal("50"),
+                incoming_rate=Decimal("60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-05",
+                posting_datetime=t_pr5,
+                qty_change=Decimal("50"),
+                incoming_rate=Decimal("60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Delivery Note",
+                voucher_no="DN-04",
+                posting_datetime=t_dn4,
+                qty_change=Decimal("-50"),
+            ),
+        ]
+
+        # Initial repost to establish baseline balances and snapshots
+        base_ledger = StockLedger(entries)
+        base_engine = RepostEngine(base_ledger)
+        base_engine.repost("Milk", "Stores", t_open)
+
+        # Apply two edits before repost:
+        # 1. PR-01 to 80 (earliest datetime: 10 Jan)
+        # 2. PR-05 to 90 (later entry on 10 Feb, behind PR-04 convergence point)
+        ledger_early = base_ledger.copy()
+        dt1_early = ledger_early.update_entry(
+            "PR-01", "Milk", incoming_rate=Decimal("80")
+        )
+        dt2_early = ledger_early.update_entry(
+            "PR-05", "Milk", incoming_rate=Decimal("90")
+        )
+        from_dt_early = min(dt1_early, dt2_early)
+
+        engine_early = RepostEngine(ledger_early)
+        engine_early.repost(
+            "Milk", "Stores", from_dt_early, early_stop=True
+        )
+
+        ledger_full = base_ledger.copy()
+        dt1_full = ledger_full.update_entry(
+            "PR-01", "Milk", incoming_rate=Decimal("80")
+        )
+        dt2_full = ledger_full.update_entry(
+            "PR-05", "Milk", incoming_rate=Decimal("90")
+        )
+        from_dt_full = min(dt1_full, dt2_full)
+
+        engine_full = RepostEngine(ledger_full)
+        engine_full.repost(
+            "Milk", "Stores", from_dt_full, early_stop=False
+        )
+
+        assert ledger_early.all_entries() == ledger_full.all_entries()
+        assert ledger_early.all_entries() == full_rebuild(ledger_early).all_entries()
+
+    def test_three_edits_with_intermediate_convergence(self) -> None:
+        """Three edits (earliest, middle, latest) with convergence between each pair.
+
+        Validates that early_stop=True, early_stop=False, and full_rebuild all
+        produce identical ledgers across multiple convergence points.
+        """
+        t_open = datetime(2026, 1, 1, 10, 0)
+        t_pr1 = datetime(2026, 1, 10, 10, 0)
+        t_dn1 = datetime(2026, 1, 15, 10, 0)
+        t_pr2 = datetime(2026, 1, 20, 10, 0)
+        t_dn2 = datetime(2026, 1, 22, 10, 0)
+        t_pr3 = datetime(2026, 1, 28, 10, 0)
+        t_dn3 = datetime(2026, 1, 30, 10, 0)
+        t_pr4 = datetime(2026, 2, 5, 10, 0)
+        t_pr5 = datetime(2026, 2, 10, 10, 0)
+        t_dn4 = datetime(2026, 2, 15, 10, 0)
+        t_dn5 = datetime(2026, 2, 18, 10, 0)
+        t_pr6 = datetime(2026, 2, 20, 10, 0)
+        t_pr7 = datetime(2026, 2, 25, 10, 0)
+        t_dn6 = datetime(2026, 2, 28, 10, 0)
+
+        entries = [
+            _make_sle(
+                item="Milk",
+                voucher_type="Opening",
+                voucher_no="OPEN-01",
+                posting_datetime=t_open,
+                qty_change=Decimal("100"),
+                incoming_rate=Decimal("50"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-01",
+                posting_datetime=t_pr1,
+                qty_change=Decimal("50"),
+                incoming_rate=Decimal("60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Delivery Note",
+                voucher_no="DN-01",
+                posting_datetime=t_dn1,
+                qty_change=Decimal("-80"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-02",
+                posting_datetime=t_pr2,
+                qty_change=Decimal("50"),
+                incoming_rate=Decimal("60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Delivery Note",
+                voucher_no="DN-02",
+                posting_datetime=t_dn2,
+                qty_change=Decimal("-60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-03",
+                posting_datetime=t_pr3,
+                qty_change=Decimal("50"),
+                incoming_rate=Decimal("60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Delivery Note",
+                voucher_no="DN-03",
+                posting_datetime=t_dn3,
+                qty_change=Decimal("-70"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-04",
+                posting_datetime=t_pr4,
+                qty_change=Decimal("50"),
+                incoming_rate=Decimal("60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-05",
+                posting_datetime=t_pr5,
+                qty_change=Decimal("50"),
+                incoming_rate=Decimal("60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Delivery Note",
+                voucher_no="DN-04",
+                posting_datetime=t_dn4,
+                qty_change=Decimal("-50"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Delivery Note",
+                voucher_no="DN-05",
+                posting_datetime=t_dn5,
+                qty_change=Decimal("-40"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-06",
+                posting_datetime=t_pr6,
+                qty_change=Decimal("50"),
+                incoming_rate=Decimal("60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-07",
+                posting_datetime=t_pr7,
+                qty_change=Decimal("50"),
+                incoming_rate=Decimal("60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Delivery Note",
+                voucher_no="DN-06",
+                posting_datetime=t_dn6,
+                qty_change=Decimal("-30"),
+            ),
+        ]
+
+        base_ledger = StockLedger(entries)
+        base_engine = RepostEngine(base_ledger)
+        base_engine.repost("Milk", "Stores", t_open)
+
+        # 3 edits on the same key: earliest (10 Jan), middle (10 Feb), latest (25 Feb)
+        ledger_early = base_ledger.copy()
+        dt1 = ledger_early.update_entry(
+            "PR-01", "Milk", incoming_rate=Decimal("80")
+        )
+        dt2 = ledger_early.update_entry(
+            "PR-05", "Milk", incoming_rate=Decimal("90")
+        )
+        dt3 = ledger_early.update_entry(
+            "PR-07", "Milk", incoming_rate=Decimal("100")
+        )
+        min_dt = min(dt1, dt2, dt3)
+
+        engine_early = RepostEngine(ledger_early)
+        engine_early.repost("Milk", "Stores", min_dt, early_stop=True)
+
+        ledger_full = base_ledger.copy()
+        ledger_full.update_entry(
+            "PR-01", "Milk", incoming_rate=Decimal("80")
+        )
+        ledger_full.update_entry(
+            "PR-05", "Milk", incoming_rate=Decimal("90")
+        )
+        ledger_full.update_entry(
+            "PR-07", "Milk", incoming_rate=Decimal("100")
+        )
+        engine_full = RepostEngine(ledger_full)
+        engine_full.repost("Milk", "Stores", min_dt, early_stop=False)
+
+        assert ledger_early.all_entries() == ledger_full.all_entries()
+        assert ledger_early.all_entries() == full_rebuild(ledger_early).all_entries()
+
+    def test_failing_repost_leaves_dirty_marks_intact(self) -> None:
+        """A failing repost (insufficient stock) leaves pending dirty marks intact."""
+        t1 = datetime(2026, 1, 1, 10, 0)
+        t2 = datetime(2026, 1, 10, 10, 0)
+        t3 = datetime(2026, 1, 15, 10, 0)
+
+        entries = [
+            _make_sle(
+                item="Milk",
+                voucher_type="Opening",
+                voucher_no="OPEN-01",
+                posting_datetime=t1,
+                qty_change=Decimal("100"),
+                incoming_rate=Decimal("50"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-01",
+                posting_datetime=t2,
+                qty_change=Decimal("50"),
+                incoming_rate=Decimal("60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Delivery Note",
+                voucher_no="DN-01",
+                posting_datetime=t3,
+                qty_change=Decimal("-120"),
+            ),
+        ]
+        ledger = StockLedger(entries)
+        engine = RepostEngine(ledger)
+        engine.repost("Milk", "Stores", t1)
+
+        # Edit PR-01 qty to 10 so total stock becomes 110, causing DN-01 (-120) to fail
+        from_dt = ledger.update_entry(
+            "PR-01", "Milk", qty_change=Decimal("10")
+        )
+        assert from_dt == t2
+        assert ledger.get_min_dirty("Milk", "Stores") == t2
+        assert ledger.get_max_dirty("Milk", "Stores") == t2
+
+        with pytest.raises(InsufficientStockError):
+            engine.repost("Milk", "Stores", from_dt, early_stop=True)
+
+        # Ledger dirty marks must remain intact after failure
+        assert ledger.get_min_dirty("Milk", "Stores") == t2
+        assert ledger.get_max_dirty("Milk", "Stores") == t2
+
+    def test_single_edit_early_stop_skips_entries(self) -> None:
+        """An entries_replayed assertion proving early stop skips entries.
+
+        Tests that a single edit still benefits from early-stop skipping.
+        """
+        t1 = datetime(2026, 1, 1, 10, 0)
+        t2 = datetime(2026, 1, 2, 10, 0)
+        t3 = datetime(2026, 1, 3, 10, 0)
+        t4 = datetime(2026, 1, 4, 10, 0)
+        t5 = datetime(2026, 1, 5, 10, 0)
+        t6 = datetime(2026, 1, 6, 10, 0)
+
+        entries = [
+            _make_sle(
+                item="Milk",
+                voucher_type="Opening",
+                voucher_no="OPEN-01",
+                posting_datetime=t1,
+                qty_change=Decimal("100"),
+                incoming_rate=Decimal("50"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-01",
+                posting_datetime=t2,
+                qty_change=Decimal("50"),
+                incoming_rate=Decimal("60"),
+            ),
+            # DN-01 fully depletes opening (100) and PR-01 (50)
+            _make_sle(
+                item="Milk",
+                voucher_type="Delivery Note",
+                voucher_no="DN-01",
+                posting_datetime=t3,
+                qty_change=Decimal("-150"),
+            ),
+            # Subsequent entries are independent and will converge
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-02",
+                posting_datetime=t4,
+                qty_change=Decimal("20"),
+                incoming_rate=Decimal("70"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Delivery Note",
+                voucher_no="DN-02",
+                posting_datetime=t5,
+                qty_change=Decimal("-10"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Delivery Note",
+                voucher_no="DN-03",
+                posting_datetime=t6,
+                qty_change=Decimal("-10"),
+            ),
+        ]
+        base_ledger = StockLedger(entries)
+        base_engine = RepostEngine(base_ledger)
+        base_engine.repost("Milk", "Stores", t1)
+
+        # Single edit on PR-01
+        ledger_early = base_ledger.copy()
+        from_dt = ledger_early.update_entry(
+            "PR-01", "Milk", incoming_rate=Decimal("85")
+        )
+        engine_early = RepostEngine(ledger_early)
+        res_early = engine_early.repost(
+            "Milk", "Stores", from_dt, early_stop=True
+        )
+
+        ledger_full = base_ledger.copy()
+        ledger_full.update_entry(
+            "PR-01", "Milk", incoming_rate=Decimal("85")
+        )
+        engine_full = RepostEngine(ledger_full)
+        res_full = engine_full.repost(
+            "Milk", "Stores", from_dt, early_stop=False
+        )
+
+        # PR-02 (t4) converges because balance was 0 at t3; early stop triggers at PR-02
+        assert res_early.entries_replayed < res_full.entries_replayed
+        assert ledger_early.all_entries() == ledger_full.all_entries()
+        assert ledger_early.get_max_dirty("Milk", "Stores") is None
+
+    def test_repost_starts_from_min_dirty_when_given_later_datetime(self) -> None:
+        """repost() starts from minimum dirty datetime if given later datetime."""
+        t1 = datetime(2026, 1, 1, 10, 0)
+        t2 = datetime(2026, 1, 10, 10, 0)
+        t3 = datetime(2026, 1, 15, 10, 0)
+        t4 = datetime(2026, 1, 20, 10, 0)
+
+        entries = [
+            _make_sle(
+                item="Milk",
+                voucher_type="Opening",
+                voucher_no="OPEN-01",
+                posting_datetime=t1,
+                qty_change=Decimal("100"),
+                incoming_rate=Decimal("50"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-01",
+                posting_datetime=t2,
+                qty_change=Decimal("50"),
+                incoming_rate=Decimal("60"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Delivery Note",
+                voucher_no="DN-01",
+                posting_datetime=t3,
+                qty_change=Decimal("-30"),
+            ),
+            _make_sle(
+                item="Milk",
+                voucher_type="Purchase Receipt",
+                voucher_no="PR-02",
+                posting_datetime=t4,
+                qty_change=Decimal("50"),
+                incoming_rate=Decimal("60"),
+            ),
+        ]
+        ledger = StockLedger(entries)
+        engine = RepostEngine(ledger)
+        engine.repost("Milk", "Stores", t1)
+
+        # Two edits: PR-01 (10 Jan) and PR-02 (20 Jan)
+        ledger.update_entry("PR-01", "Milk", incoming_rate=Decimal("80"))
+        ledger.update_entry("PR-02", "Milk", incoming_rate=Decimal("90"))
+
+        # Caller accidentally passes only the later datetime (20 Jan)
+        engine.repost("Milk", "Stores", from_datetime=t4, early_stop=True)
+
+        # Repost must have started from 10 Jan (min dirty datetime)
+        assert ledger.all_entries() == full_rebuild(ledger).all_entries()
+        assert ledger.get_max_dirty("Milk", "Stores") is None
+
+
+

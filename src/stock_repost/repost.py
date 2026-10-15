@@ -269,13 +269,21 @@ class RepostEngine:
             for e in self.ledger.all_entries()
         }
 
+        min_dirty = self.ledger.get_min_dirty(item, warehouse)
+        if min_dirty is not None and min_dirty < from_datetime:
+            start_datetime = min_dirty
+        else:
+            start_datetime = from_datetime
+
         working_ledger = self.ledger.copy()
         work_queue = _WorkQueue()
-        work_queue.push(from_datetime, item, warehouse)
+        work_queue.push(start_datetime, item, warehouse)
         entries_replayed = 0
+        reposted_keys: set[tuple[str, str]] = set()
 
         while not work_queue.is_empty():
             cur_dt, cur_item, cur_wh = work_queue.pop_next(working_ledger)
+            reposted_keys.add((cur_item, cur_wh))
 
             prev_sle = working_ledger.last_before(cur_item, cur_wh, cur_dt)
             if prev_sle is not None:
@@ -356,9 +364,15 @@ class RepostEngine:
                                     dep.warehouse,
                                 )
 
+                max_dirty = working_ledger.get_max_dirty(cur_item, cur_wh)
+                past_max_dirty = (
+                    max_dirty is None or entry.posting_datetime > max_dirty
+                )
+
                 if (
                     early_stop
                     and i >= 1
+                    and past_max_dirty
                     and new_entry.fifo_snapshot == entry.fifo_snapshot
                     and new_entry.value_change == entry.value_change
                     and new_entry.balance_value == entry.balance_value
@@ -369,6 +383,8 @@ class RepostEngine:
                     break
 
         self.ledger.replace_all(working_ledger.all_entries())
+        for k_item, k_wh in reposted_keys:
+            self.ledger.clear_dirty(k_item, k_wh)
 
         value_changed: list[ValueChangedItem] = []
         re_evaluated_only: list[StockLedgerEntry] = []

@@ -35,6 +35,78 @@ class StockLedger:
             )
         else:
             self._entries = []
+        self._dirty_ranges: dict[tuple[str, str], tuple[datetime, datetime]] = {}
+
+    def record_dirty(self, item: str, warehouse: str, dt: datetime) -> None:
+        """Record a dirty posting datetime for the given item and warehouse.
+
+        Maintains both the minimum and maximum pending dirty datetimes
+        for the ``(item, warehouse)`` key.
+
+        Args:
+            item: Item SKU code.
+            warehouse: Target warehouse.
+            dt: Affected posting datetime.
+        """
+        key = (item, warehouse)
+        if key not in self._dirty_ranges:
+            self._dirty_ranges[key] = (dt, dt)
+        else:
+            min_dt, max_dt = self._dirty_ranges[key]
+            self._dirty_ranges[key] = (min(min_dt, dt), max(max_dt, dt))
+
+    def get_dirty_range(
+        self, item: str, warehouse: str
+    ) -> tuple[datetime, datetime] | None:
+        """Return the (min_dirty, max_dirty) tuple for the key, or None.
+
+        Args:
+            item: Item SKU code.
+            warehouse: Target warehouse.
+
+        Returns:
+            Tuple of (min_dirty, max_dirty) datetimes if dirty, or None.
+        """
+        return self._dirty_ranges.get((item, warehouse))
+
+    def get_min_dirty(self, item: str, warehouse: str) -> datetime | None:
+        """Return the minimum pending dirty datetime for the key, or None.
+
+        Args:
+            item: Item SKU code.
+            warehouse: Target warehouse.
+
+        Returns:
+            The earliest dirty datetime, or None if the key is not dirty.
+        """
+        val = self._dirty_ranges.get((item, warehouse))
+        return val[0] if val is not None else None
+
+    def get_max_dirty(self, item: str, warehouse: str) -> datetime | None:
+        """Return the maximum pending dirty datetime for the key, or None.
+
+        Args:
+            item: Item SKU code.
+            warehouse: Target warehouse.
+
+        Returns:
+            The latest dirty datetime, or None if the key is not dirty.
+        """
+        val = self._dirty_ranges.get((item, warehouse))
+        return val[1] if val is not None else None
+
+    def clear_dirty(self, item: str, warehouse: str) -> None:
+        """Clear all pending dirty marks for the given item and warehouse.
+
+        Args:
+            item: Item SKU code.
+            warehouse: Target warehouse.
+        """
+        self._dirty_ranges.pop((item, warehouse), None)
+
+    def clear_all_dirty(self) -> None:
+        """Clear all pending dirty marks across all keys."""
+        self._dirty_ranges.clear()
 
     def __len__(self) -> int:
         """Return the number of entries in the ledger."""
@@ -128,7 +200,15 @@ class StockLedger:
                 self._entries.sort(
                     key=lambda e: (e.posting_datetime, e.creation_seq)
                 )
-                return min(entry.posting_datetime, new_entry.posting_datetime)
+                affected_dt = min(entry.posting_datetime, new_entry.posting_datetime)
+                self.record_dirty(entry.item, entry.warehouse, affected_dt)
+                if new_entry.posting_datetime != entry.posting_datetime:
+                    self.record_dirty(
+                        entry.item,
+                        entry.warehouse,
+                        max(entry.posting_datetime, new_entry.posting_datetime),
+                    )
+                return affected_dt
 
         msg = f"No entry found with voucher_no={voucher_no!r} and item={item!r}"
         raise KeyError(msg)
@@ -146,6 +226,7 @@ class StockLedger:
         """
         self._entries.append(entry)
         self._entries.sort(key=lambda e: (e.posting_datetime, e.creation_seq))
+        self.record_dirty(entry.item, entry.warehouse, entry.posting_datetime)
         return entry.posting_datetime
 
     def remove_entry(
@@ -174,6 +255,9 @@ class StockLedger:
                 if warehouse is not None and entry.warehouse != warehouse:
                     continue
                 removed = self._entries.pop(i)
+                self.record_dirty(
+                    removed.item, removed.warehouse, removed.posting_datetime
+                )
                 return removed.posting_datetime
 
         msg = f"No entry found with voucher_no={voucher_no!r} and item={item!r}"
@@ -210,5 +294,7 @@ class StockLedger:
         )
 
     def copy(self) -> StockLedger:
-        """Return a copy of this ledger."""
-        return StockLedger(self._entries)
+        """Return a copy of this ledger, preserving pending dirty marks."""
+        copied = StockLedger(self._entries)
+        copied._dirty_ranges = dict(self._dirty_ranges)
+        return copied
