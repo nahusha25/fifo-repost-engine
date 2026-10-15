@@ -716,3 +716,716 @@ class TestCoalescingOfDuplicateWorkItems:
         assert len(res.value_changed) >= 1
         assert ledger.all_entries()[0].incoming_rate == Decimal("110")
         assert ledger.all_entries()[2].outgoing_value == Decimal("550")
+
+
+# ========================================================================
+# Phase 2.1: Test Hardening
+# ========================================================================
+
+
+def full_rebuild(ledger: StockLedger) -> StockLedger:
+    """Oracle that rebuilds the entire ledger from scratch without early stop."""
+    rebuilt = ledger.copy()
+    if len(rebuilt) == 0:
+        return rebuilt
+    engine = RepostEngine(rebuilt)
+    seen: set[tuple[str, str]] = set()
+    for entry in rebuilt.all_entries():
+        key = (entry.item, entry.warehouse)
+        if key not in seen:
+            seen.add(key)
+            min_dt = min(
+                e.posting_datetime
+                for e in rebuilt.all_entries()
+                if (e.item, e.warehouse) == key
+            )
+            engine.repost(key[0], key[1], min_dt, early_stop=False)
+    return rebuilt
+
+
+class TestParametrizedScenarios:
+    """Parametrized early_stop=(True, False) across all domain scenarios."""
+
+    @pytest.mark.parametrize("early_stop", [True, False])
+    def test_receipt_chain(self, early_stop: bool) -> None:
+        """Receipt chain produces identical ledgers under early_stop True and False."""
+        t1 = datetime(2026, 1, 1, 10, 0)
+        t2 = datetime(2026, 1, 2, 10, 0)
+        e1 = _make_sle(
+            item="P-ITEM",
+            voucher_no="PR-01",
+            posting_datetime=t1,
+            qty_change=Decimal("10"),
+            incoming_rate=Decimal("100"),
+            value_change=Decimal("1000"),
+            balance_qty=Decimal("10"),
+            balance_value=Decimal("1000"),
+            fifo_snapshot=((Decimal("10"), Decimal("100")),),
+        )
+        e2 = _make_sle(
+            item="P-ITEM",
+            voucher_no="PR-02",
+            posting_datetime=t2,
+            qty_change=Decimal("5"),
+            incoming_rate=Decimal("200"),
+            value_change=Decimal("1000"),
+            balance_qty=Decimal("15"),
+            balance_value=Decimal("2000"),
+            fifo_snapshot=(
+                (Decimal("10"), Decimal("100")),
+                (Decimal("5"), Decimal("200")),
+            ),
+        )
+        ledger = StockLedger([e1, e2])
+        from_dt = ledger.update_entry(
+            "PR-01", "P-ITEM", incoming_rate=Decimal("150")
+        )
+        engine = RepostEngine(ledger)
+        engine.repost("P-ITEM", "Stores", from_dt, early_stop=early_stop)
+
+        assert ledger.all_entries() == full_rebuild(ledger).all_entries()
+
+    @pytest.mark.parametrize("early_stop", [True, False])
+    def test_fifo_layers(self, early_stop: bool) -> None:
+        """FIFO multi-layer consumption produces identical ledgers."""
+        t1 = datetime(2026, 1, 1, 10, 0)
+        t2 = datetime(2026, 1, 2, 10, 0)
+        t3 = datetime(2026, 1, 3, 10, 0)
+        e1 = _make_sle(
+            item="P-FIFO",
+            voucher_no="PR-01",
+            posting_datetime=t1,
+            qty_change=Decimal("10"),
+            incoming_rate=Decimal("100"),
+            value_change=Decimal("1000"),
+            balance_qty=Decimal("10"),
+            balance_value=Decimal("1000"),
+            fifo_snapshot=((Decimal("10"), Decimal("100")),),
+        )
+        e2 = _make_sle(
+            item="P-FIFO",
+            voucher_no="PR-02",
+            posting_datetime=t2,
+            qty_change=Decimal("10"),
+            incoming_rate=Decimal("200"),
+            value_change=Decimal("2000"),
+            balance_qty=Decimal("20"),
+            balance_value=Decimal("3000"),
+            fifo_snapshot=(
+                (Decimal("10"), Decimal("100")),
+                (Decimal("10"), Decimal("200")),
+            ),
+        )
+        e3 = _make_sle(
+            item="P-FIFO",
+            voucher_type="Delivery Note",
+            voucher_no="DN-01",
+            posting_datetime=t3,
+            qty_change=Decimal("-15"),
+            outgoing_value=Decimal("2000"),
+            value_change=Decimal("-2000"),
+            balance_qty=Decimal("5"),
+            balance_value=Decimal("1000"),
+            fifo_snapshot=((Decimal("5"), Decimal("200")),),
+        )
+        ledger = StockLedger([e1, e2, e3])
+        from_dt = ledger.update_entry(
+            "PR-01", "P-FIFO", incoming_rate=Decimal("120")
+        )
+        engine = RepostEngine(ledger)
+        engine.repost("P-FIFO", "Stores", from_dt, early_stop=early_stop)
+
+        assert ledger.all_entries() == full_rebuild(ledger).all_entries()
+
+    @pytest.mark.parametrize("early_stop", [True, False])
+    def test_rate_edit_multiple_issues(self, early_stop: bool) -> None:
+        """Rate edit across multiple sequential issues matches oracle."""
+        t1 = datetime(2026, 1, 1, 10, 0)
+        t2 = datetime(2026, 1, 2, 10, 0)
+        t3 = datetime(2026, 1, 3, 10, 0)
+        e1 = _make_sle(
+            item="P-RATE",
+            voucher_no="PR-01",
+            posting_datetime=t1,
+            qty_change=Decimal("10"),
+            incoming_rate=Decimal("10"),
+            value_change=Decimal("100"),
+            balance_qty=Decimal("10"),
+            balance_value=Decimal("100"),
+            fifo_snapshot=((Decimal("10"), Decimal("10")),),
+        )
+        e2 = _make_sle(
+            item="P-RATE",
+            voucher_type="Delivery Note",
+            voucher_no="DN-01",
+            posting_datetime=t2,
+            qty_change=Decimal("-4"),
+            outgoing_value=Decimal("40"),
+            value_change=Decimal("-40"),
+            balance_qty=Decimal("6"),
+            balance_value=Decimal("60"),
+            fifo_snapshot=((Decimal("6"), Decimal("10")),),
+        )
+        e3 = _make_sle(
+            item="P-RATE",
+            voucher_type="Delivery Note",
+            voucher_no="DN-02",
+            posting_datetime=t3,
+            qty_change=Decimal("-4"),
+            outgoing_value=Decimal("40"),
+            value_change=Decimal("-40"),
+            balance_qty=Decimal("2"),
+            balance_value=Decimal("20"),
+            fifo_snapshot=((Decimal("2"), Decimal("10")),),
+        )
+        ledger = StockLedger([e1, e2, e3])
+        from_dt = ledger.update_entry(
+            "PR-01", "P-RATE", incoming_rate=Decimal("20")
+        )
+        engine = RepostEngine(ledger)
+        engine.repost("P-RATE", "Stores", from_dt, early_stop=early_stop)
+
+        assert ledger.all_entries() == full_rebuild(ledger).all_entries()
+
+    @pytest.mark.parametrize("early_stop", [True, False])
+    def test_manufacture_1_rm(self, early_stop: bool) -> None:
+        """1 raw material manufacture dependency matches oracle."""
+        t1 = datetime(2026, 1, 1, 10, 0)
+        t2 = datetime(2026, 1, 2, 10, 0)
+        rm_rec = _make_sle(
+            item="P-RM1",
+            voucher_no="PR-RM1",
+            posting_datetime=t1,
+            qty_change=Decimal("10"),
+            incoming_rate=Decimal("10"),
+            value_change=Decimal("100"),
+            balance_qty=Decimal("10"),
+            balance_value=Decimal("100"),
+            fifo_snapshot=((Decimal("10"), Decimal("10")),),
+        )
+        rm_iss = _make_sle(
+            item="P-RM1",
+            voucher_type="Stock Entry",
+            voucher_no="MFG-P1",
+            posting_datetime=t2,
+            creation_seq=1,
+            qty_change=Decimal("-10"),
+            outgoing_value=Decimal("100"),
+            value_change=Decimal("-100"),
+            balance_qty=Decimal("0"),
+            balance_value=Decimal("0"),
+            fifo_snapshot=(),
+        )
+        fg_rec = _make_sle(
+            item="P-FG1",
+            voucher_type="Stock Entry",
+            voucher_no="MFG-P1",
+            posting_datetime=t2,
+            creation_seq=2,
+            qty_change=Decimal("5"),
+            incoming_rate=Decimal("20"),
+            value_change=Decimal("100"),
+            balance_qty=Decimal("5"),
+            balance_value=Decimal("100"),
+            fifo_snapshot=((Decimal("5"), Decimal("20")),),
+            depends_on="MFG-P1",
+        )
+        ledger = StockLedger([rm_rec, rm_iss, fg_rec])
+        from_dt = ledger.update_entry(
+            "PR-RM1", "P-RM1", incoming_rate=Decimal("15")
+        )
+        engine = RepostEngine(ledger)
+        engine.repost("P-RM1", "Stores", from_dt, early_stop=early_stop)
+
+        assert ledger.all_entries() == full_rebuild(ledger).all_entries()
+
+    @pytest.mark.parametrize("early_stop", [True, False])
+    def test_manufacture_2_rm(self, early_stop: bool) -> None:
+        """2 raw materials manufacture dependency matches oracle."""
+        t1 = datetime(2026, 1, 1, 10, 0)
+        t2 = datetime(2026, 1, 2, 10, 0)
+        rm1_rec = _make_sle(
+            item="P-RM1A",
+            voucher_no="PR-01",
+            posting_datetime=t1,
+            qty_change=Decimal("10"),
+            incoming_rate=Decimal("10"),
+            value_change=Decimal("100"),
+            balance_qty=Decimal("10"),
+            balance_value=Decimal("100"),
+            fifo_snapshot=((Decimal("10"), Decimal("10")),),
+        )
+        rm2_rec = _make_sle(
+            item="P-RM2A",
+            voucher_no="PR-02",
+            posting_datetime=t1,
+            qty_change=Decimal("10"),
+            incoming_rate=Decimal("20"),
+            value_change=Decimal("200"),
+            balance_qty=Decimal("10"),
+            balance_value=Decimal("200"),
+            fifo_snapshot=((Decimal("10"), Decimal("20")),),
+        )
+        rm1_iss = _make_sle(
+            item="P-RM1A",
+            voucher_type="Stock Entry",
+            voucher_no="MFG-P2",
+            posting_datetime=t2,
+            creation_seq=1,
+            qty_change=Decimal("-5"),
+            outgoing_value=Decimal("50"),
+            value_change=Decimal("-50"),
+            balance_qty=Decimal("5"),
+            balance_value=Decimal("50"),
+            fifo_snapshot=((Decimal("5"), Decimal("10")),),
+        )
+        rm2_iss = _make_sle(
+            item="P-RM2A",
+            voucher_type="Stock Entry",
+            voucher_no="MFG-P2",
+            posting_datetime=t2,
+            creation_seq=2,
+            qty_change=Decimal("-5"),
+            outgoing_value=Decimal("100"),
+            value_change=Decimal("-100"),
+            balance_qty=Decimal("5"),
+            balance_value=Decimal("100"),
+            fifo_snapshot=((Decimal("5"), Decimal("20")),),
+        )
+        fg_rec = _make_sle(
+            item="P-FG2",
+            voucher_type="Stock Entry",
+            voucher_no="MFG-P2",
+            posting_datetime=t2,
+            creation_seq=3,
+            qty_change=Decimal("5"),
+            incoming_rate=Decimal("30"),
+            value_change=Decimal("150"),
+            balance_qty=Decimal("5"),
+            balance_value=Decimal("150"),
+            fifo_snapshot=((Decimal("5"), Decimal("30")),),
+            depends_on="MFG-P2",
+        )
+        ledger = StockLedger([rm1_rec, rm2_rec, rm1_iss, rm2_iss, fg_rec])
+        from_dt = ledger.update_entry(
+            "PR-01", "P-RM1A", incoming_rate=Decimal("20")
+        )
+        engine = RepostEngine(ledger)
+        engine.repost("P-RM1A", "Stores", from_dt, early_stop=early_stop)
+
+        assert ledger.all_entries() == full_rebuild(ledger).all_entries()
+
+    @pytest.mark.parametrize("early_stop", [True, False])
+    def test_long_chain(self, early_stop: bool) -> None:
+        """Long sequential chain matches oracle under both early_stop modes."""
+        entries: list[StockLedgerEntry] = []
+        base_time = datetime(2026, 1, 1, 10, 0)
+        entries.append(
+            _make_sle(
+                item="P-LONG",
+                voucher_no="PR-BASE",
+                posting_datetime=base_time,
+                qty_change=Decimal("100"),
+                incoming_rate=Decimal("10"),
+                value_change=Decimal("1000"),
+                balance_qty=Decimal("100"),
+                balance_value=Decimal("1000"),
+                fifo_snapshot=((Decimal("100"), Decimal("10")),),
+            )
+        )
+        for i in range(1, 11):
+            dt = datetime(2026, 1, 1 + i, 10, 0)
+            bal_qty = Decimal(100 - i * 5)
+            bal_val = bal_qty * Decimal("10")
+            entries.append(
+                _make_sle(
+                    item="P-LONG",
+                    voucher_type="Delivery Note",
+                    voucher_no=f"DN-{i:02d}",
+                    posting_datetime=dt,
+                    qty_change=Decimal("-5"),
+                    outgoing_value=Decimal("50"),
+                    value_change=Decimal("-50"),
+                    balance_qty=bal_qty,
+                    balance_value=bal_val,
+                    fifo_snapshot=((bal_qty, Decimal("10")),),
+                )
+            )
+        ledger = StockLedger(entries)
+        from_dt = ledger.update_entry(
+            "PR-BASE", "P-LONG", incoming_rate=Decimal("12")
+        )
+        engine = RepostEngine(ledger)
+        engine.repost("P-LONG", "Stores", from_dt, early_stop=early_stop)
+
+        assert ledger.all_entries() == full_rebuild(ledger).all_entries()
+
+
+class TestEarlyStopSkipping:
+    """Tests verifying early_stop actually skips subsequent entries."""
+
+    def test_early_stop_actually_skips(self) -> None:
+        """Early stop halts replay early, replaying strictly fewer entries."""
+        entries: list[StockLedgerEntry] = []
+        t0 = datetime(2026, 1, 1, 10, 0)
+        t1 = datetime(2026, 1, 2, 10, 0)
+        t2 = datetime(2026, 1, 3, 10, 0)
+
+        # Entry 0: Initial receipt (10 @ 100)
+        entries.append(
+            _make_sle(
+                item="SKIP-ITEM",
+                voucher_no="PR-01",
+                posting_datetime=t0,
+                qty_change=Decimal("10"),
+                incoming_rate=Decimal("100"),
+                value_change=Decimal("1000"),
+                balance_qty=Decimal("10"),
+                balance_value=Decimal("1000"),
+                fifo_snapshot=((Decimal("10"), Decimal("100")),),
+            )
+        )
+        # Entry 1: Exact depletion issue (-10)
+        entries.append(
+            _make_sle(
+                item="SKIP-ITEM",
+                voucher_type="Delivery Note",
+                voucher_no="DN-01",
+                posting_datetime=t1,
+                qty_change=Decimal("-10"),
+                outgoing_value=Decimal("1000"),
+                value_change=Decimal("-1000"),
+                balance_qty=Decimal("0"),
+                balance_value=Decimal("0"),
+                fifo_snapshot=(),
+            )
+        )
+        # Entry 2: Fresh receipt resetting state (10 @ 200)
+        entries.append(
+            _make_sle(
+                item="SKIP-ITEM",
+                voucher_no="PR-02",
+                posting_datetime=t2,
+                qty_change=Decimal("10"),
+                incoming_rate=Decimal("200"),
+                value_change=Decimal("2000"),
+                balance_qty=Decimal("10"),
+                balance_value=Decimal("2000"),
+                fifo_snapshot=((Decimal("10"), Decimal("200")),),
+            )
+        )
+        # Entries 3-25: 22 subsequent issues from the fresh receipt
+        for i in range(3, 25):
+            dt = datetime(2026, 1, 3 + i, 10, 0)
+            bal_qty = Decimal(10) - Decimal(i - 2) * Decimal("0.2")
+            bal_val = bal_qty * Decimal("200")
+            entries.append(
+                _make_sle(
+                    item="SKIP-ITEM",
+                    voucher_type="Delivery Note",
+                    voucher_no=f"DN-{i:02d}",
+                    posting_datetime=dt,
+                    qty_change=Decimal("-0.2"),
+                    outgoing_value=Decimal("40"),
+                    value_change=Decimal("-40"),
+                    balance_qty=bal_qty,
+                    balance_value=bal_val,
+                    fifo_snapshot=((bal_qty, Decimal("200")),),
+                )
+            )
+
+        ledger_stop = StockLedger(entries)
+        ledger_no_stop = StockLedger(entries)
+
+        from_dt = ledger_stop.update_entry(
+            "PR-01", "SKIP-ITEM", incoming_rate=Decimal("120")
+        )
+        ledger_no_stop.update_entry(
+            "PR-01", "SKIP-ITEM", incoming_rate=Decimal("120")
+        )
+
+        engine_stop = RepostEngine(ledger_stop)
+        res_stop = engine_stop.repost(
+            "SKIP-ITEM", "Stores", from_dt, early_stop=True
+        )
+
+        engine_no_stop = RepostEngine(ledger_no_stop)
+        res_no_stop = engine_no_stop.repost(
+            "SKIP-ITEM", "Stores", from_dt, early_stop=False
+        )
+
+        # Assert identical resulting ledgers
+        assert ledger_stop.all_entries() == ledger_no_stop.all_entries()
+
+        # Assert early stop actually skipped entries
+        assert res_stop.entries_replayed < res_no_stop.entries_replayed
+        assert res_stop.entries_replayed == 3
+        assert res_no_stop.entries_replayed == len(entries)
+
+    def test_early_stop_never_stops_on_edited_entry(self) -> None:
+        """Edit with no effective change replays the edited entry (i=0 never stops)."""
+        t0 = datetime(2026, 1, 1, 10, 0)
+        t1 = datetime(2026, 1, 2, 10, 0)
+        e1 = _make_sle(
+            item="NO-OP-ITEM",
+            voucher_no="PR-01",
+            posting_datetime=t0,
+            qty_change=Decimal("10"),
+            incoming_rate=Decimal("50"),
+            value_change=Decimal("500"),
+            balance_qty=Decimal("10"),
+            balance_value=Decimal("500"),
+            fifo_snapshot=((Decimal("10"), Decimal("50")),),
+        )
+        e2 = _make_sle(
+            item="NO-OP-ITEM",
+            voucher_no="PR-02",
+            posting_datetime=t1,
+            qty_change=Decimal("10"),
+            incoming_rate=Decimal("50"),
+            value_change=Decimal("500"),
+            balance_qty=Decimal("20"),
+            balance_value=Decimal("1000"),
+            fifo_snapshot=((Decimal("20"), Decimal("50")),),
+        )
+        ledger = StockLedger([e1, e2])
+        # Update with identical rate
+        from_dt = ledger.update_entry(
+            "PR-01", "NO-OP-ITEM", incoming_rate=Decimal("50")
+        )
+
+        engine = RepostEngine(ledger)
+        res = engine.repost("NO-OP-ITEM", "Stores", from_dt, early_stop=True)
+
+        # Must have replayed at least entry 0 (never stops on entry 0)
+        assert res.entries_replayed >= 1
+
+
+class TestValueChangedVsReEvaluatedOnly:
+    """Tests asserting exact partition between value_changed and re_evaluated_only."""
+
+    def test_value_changed_vs_re_evaluated_only(self) -> None:
+        """Milk opening 100@50, receipt 50@60, issue -80, edit receipt rate to 80."""
+        t1 = datetime(2026, 1, 1, 10, 0)
+        t2 = datetime(2026, 1, 2, 10, 0)
+        t3 = datetime(2026, 1, 3, 10, 0)
+
+        # Opening: +100 @ 50
+        opening = _make_sle(
+            item="Milk",
+            voucher_no="OPEN-01",
+            posting_datetime=t1,
+            qty_change=Decimal("100"),
+            incoming_rate=Decimal("50"),
+            value_change=Decimal("5000"),
+            balance_qty=Decimal("100"),
+            balance_value=Decimal("5000"),
+            fifo_snapshot=((Decimal("100"), Decimal("50")),),
+        )
+        # Receipt: +50 @ 60
+        receipt = _make_sle(
+            item="Milk",
+            voucher_no="PR-01",
+            posting_datetime=t2,
+            qty_change=Decimal("50"),
+            incoming_rate=Decimal("60"),
+            value_change=Decimal("3000"),
+            balance_qty=Decimal("150"),
+            balance_value=Decimal("8000"),
+            fifo_snapshot=(
+                (Decimal("100"), Decimal("50")),
+                (Decimal("50"), Decimal("60")),
+            ),
+        )
+        # Issue: -80 (consumes 80 from opening 100@50 layer, 50@60 layer untouched)
+        issue = _make_sle(
+            item="Milk",
+            voucher_type="Delivery Note",
+            voucher_no="DN-01",
+            posting_datetime=t3,
+            qty_change=Decimal("-80"),
+            outgoing_value=Decimal("4000"),
+            value_change=Decimal("-4000"),
+            balance_qty=Decimal("70"),
+            balance_value=Decimal("4000"),
+            fifo_snapshot=(
+                (Decimal("20"), Decimal("50")),
+                (Decimal("50"), Decimal("60")),
+            ),
+        )
+
+        ledger = StockLedger([opening, receipt, issue])
+        from_dt = ledger.update_entry(
+            "PR-01", "Milk", incoming_rate=Decimal("80")
+        )
+
+        engine = RepostEngine(ledger)
+        res = engine.repost("Milk", "Stores", from_dt, early_stop=True)
+
+        # Assert exact voucher lists
+        assert [vc.voucher_no for vc in res.value_changed] == ["PR-01"]
+        assert [e.voucher_no for e in res.re_evaluated_only] == ["DN-01"]
+
+        # Assert exact values on value_changed
+        vc = res.value_changed[0]
+        assert vc.voucher_no == "PR-01"
+        assert vc.old_value == Decimal("3000")
+        assert vc.new_value == Decimal("4000")
+        assert vc.delta == Decimal("1000")
+
+        # Assert exact values on re_evaluated_only
+        re_eval = res.re_evaluated_only[0]
+        assert re_eval.voucher_no == "DN-01"
+        assert re_eval.value_change == Decimal("-4000")
+        assert re_eval.balance_value == Decimal("5000")
+
+
+class TestLedgerMutationsAndOracle:
+    """Tests for insert_entry, remove_entry, and update_entry with oracle."""
+
+    def test_insert_entry_matches_full_rebuild(self) -> None:
+        """Backdated receipt inserted between existing entries matches oracle."""
+        t1 = datetime(2026, 1, 1, 10, 0)
+        t2 = datetime(2026, 1, 2, 10, 0)
+        t3 = datetime(2026, 1, 3, 10, 0)
+
+        e1 = _make_sle(
+            item="MUT-ITEM",
+            voucher_no="PR-01",
+            posting_datetime=t1,
+            qty_change=Decimal("10"),
+            incoming_rate=Decimal("10"),
+            value_change=Decimal("100"),
+            balance_qty=Decimal("10"),
+            balance_value=Decimal("100"),
+            fifo_snapshot=((Decimal("10"), Decimal("10")),),
+        )
+        e3 = _make_sle(
+            item="MUT-ITEM",
+            voucher_type="Delivery Note",
+            voucher_no="DN-01",
+            posting_datetime=t3,
+            qty_change=Decimal("-5"),
+            outgoing_value=Decimal("50"),
+            value_change=Decimal("-50"),
+            balance_qty=Decimal("5"),
+            balance_value=Decimal("50"),
+            fifo_snapshot=((Decimal("5"), Decimal("10")),),
+        )
+        ledger = StockLedger([e1, e3])
+
+        # Backdated insert at T2 between T1 and T3
+        e2_inserted = _make_sle(
+            item="MUT-ITEM",
+            voucher_no="PR-02",
+            posting_datetime=t2,
+            qty_change=Decimal("10"),
+            incoming_rate=Decimal("20"),
+            value_change=Decimal("200"),
+        )
+        from_dt = ledger.insert_entry(e2_inserted)
+        assert from_dt == t2
+
+        engine = RepostEngine(ledger)
+        engine.repost("MUT-ITEM", "Stores", from_dt)
+
+        assert ledger.all_entries() == full_rebuild(ledger).all_entries()
+
+    def test_remove_entry_matches_full_rebuild(self) -> None:
+        """Cancelling a receipt via remove_entry matches oracle."""
+        t1 = datetime(2026, 1, 1, 10, 0)
+        t2 = datetime(2026, 1, 2, 10, 0)
+        t3 = datetime(2026, 1, 3, 10, 0)
+
+        e1 = _make_sle(
+            item="MUT-REM",
+            voucher_no="PR-01",
+            posting_datetime=t1,
+            qty_change=Decimal("10"),
+            incoming_rate=Decimal("10"),
+            value_change=Decimal("100"),
+            balance_qty=Decimal("10"),
+            balance_value=Decimal("100"),
+            fifo_snapshot=((Decimal("10"), Decimal("10")),),
+        )
+        e2 = _make_sle(
+            item="MUT-REM",
+            voucher_no="PR-02",
+            posting_datetime=t2,
+            qty_change=Decimal("10"),
+            incoming_rate=Decimal("20"),
+            value_change=Decimal("200"),
+            balance_qty=Decimal("20"),
+            balance_value=Decimal("300"),
+            fifo_snapshot=(
+                (Decimal("10"), Decimal("10")),
+                (Decimal("10"), Decimal("20")),
+            ),
+        )
+        e3 = _make_sle(
+            item="MUT-REM",
+            voucher_type="Delivery Note",
+            voucher_no="DN-01",
+            posting_datetime=t3,
+            qty_change=Decimal("-5"),
+            outgoing_value=Decimal("50"),
+            value_change=Decimal("-50"),
+            balance_qty=Decimal("15"),
+            balance_value=Decimal("250"),
+            fifo_snapshot=(
+                (Decimal("5"), Decimal("10")),
+                (Decimal("10"), Decimal("20")),
+            ),
+        )
+        ledger = StockLedger([e1, e2, e3])
+
+        # Cancel PR-02
+        from_dt = ledger.remove_entry("PR-02", "MUT-REM")
+        assert from_dt == t2
+
+        engine = RepostEngine(ledger)
+        engine.repost("MUT-REM", "Stores", from_dt)
+
+        assert ledger.all_entries() == full_rebuild(ledger).all_entries()
+
+    def test_update_entry_qty_matches_full_rebuild(self) -> None:
+        """Updating quantity on an entry matches oracle."""
+        t1 = datetime(2026, 1, 1, 10, 0)
+        t2 = datetime(2026, 1, 2, 10, 0)
+
+        e1 = _make_sle(
+            item="MUT-QTY",
+            voucher_no="PR-01",
+            posting_datetime=t1,
+            qty_change=Decimal("20"),
+            incoming_rate=Decimal("10"),
+            value_change=Decimal("200"),
+            balance_qty=Decimal("20"),
+            balance_value=Decimal("200"),
+            fifo_snapshot=((Decimal("20"), Decimal("10")),),
+        )
+        e2 = _make_sle(
+            item="MUT-QTY",
+            voucher_type="Delivery Note",
+            voucher_no="DN-01",
+            posting_datetime=t2,
+            qty_change=Decimal("-5"),
+            outgoing_value=Decimal("50"),
+            value_change=Decimal("-50"),
+            balance_qty=Decimal("15"),
+            balance_value=Decimal("150"),
+            fifo_snapshot=((Decimal("15"), Decimal("10")),),
+        )
+        ledger = StockLedger([e1, e2])
+
+        # Increase issue qty from -5 to -8
+        from_dt = ledger.update_entry(
+            "DN-01", "MUT-QTY", qty_change=Decimal("-8")
+        )
+        assert from_dt == t2
+
+        engine = RepostEngine(ledger)
+        engine.repost("MUT-QTY", "Stores", from_dt)
+
+        assert ledger.all_entries() == full_rebuild(ledger).all_entries()
+

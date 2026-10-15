@@ -74,10 +74,12 @@ class RepostResult:
         value_changed: Entries whose financial value_change changed.
         re_evaluated_only: Entries whose running balances or layer
             snapshots changed, but whose value_change remained identical.
+        entries_replayed: Total number of SLEs actually recomputed.
     """
 
     value_changed: tuple[ValueChangedItem, ...]
     re_evaluated_only: tuple[StockLedgerEntry, ...]
+    entries_replayed: int = 0
 
 
 def is_dependent_on(
@@ -270,6 +272,7 @@ class RepostEngine:
         working_ledger = self.ledger.copy()
         work_queue = _WorkQueue()
         work_queue.push(from_datetime, item, warehouse)
+        entries_replayed = 0
 
         while not work_queue.is_empty():
             cur_dt, cur_item, cur_wh = work_queue.pop_next(working_ledger)
@@ -329,6 +332,7 @@ class RepostEngine:
                     )
 
                 working_ledger.replace_entry(entry, new_entry)
+                entries_replayed += 1
 
                 if entry.qty_change < Decimal("0"):
                     for dep in working_ledger.all_entries():
@@ -413,4 +417,5 @@ class RepostEngine:
         return RepostResult(
             value_changed=tuple(value_changed),
             re_evaluated_only=tuple(re_evaluated_only),
+            entries_replayed=entries_replayed,
         )
