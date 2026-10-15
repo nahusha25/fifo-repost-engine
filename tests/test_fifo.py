@@ -187,3 +187,38 @@ class TestDecimalPrecision:
         result = q.consume(Decimal("1"))
         with pytest.raises(AttributeError):
             result.total_value = Decimal("999")  # type: ignore[misc]
+
+
+# -- Deficit handling and hardening --------------------------------------
+
+
+class TestDeficitAndHardening:
+    """Tests for negative stock deficit tracking and snapshot constraints."""
+
+    def test_default_allow_negative_is_false(self) -> None:
+        """FifoQueue() raises InsufficientStockError when consuming over balance."""
+        q = FifoQueue()
+        q.add(Decimal("5"), Decimal("10"))
+        with pytest.raises(InsufficientStockError):
+            q.consume(Decimal("10"))
+
+    def test_deficit_is_offset_by_next_add(self) -> None:
+        """Consuming 30 from 20 leaves deficit; adding 50 @ 10 offsets deficit."""
+        q = FifoQueue(allow_negative=True)
+        q.add(Decimal("20"), Decimal("5"))
+        q.consume(Decimal("30"))
+        assert q.balance_qty == Decimal("-10")
+
+        q.add(Decimal("50"), Decimal("10"))
+        assert q.balance_qty == Decimal("40")
+        assert q.balance_value == Decimal("400")
+
+    def test_snapshot_raises_when_deficit_exists(self) -> None:
+        """snapshot() on a queue with a nonzero deficit raises ValueError."""
+        q = FifoQueue(allow_negative=True)
+        q.add(Decimal("20"), Decimal("5"))
+        q.consume(Decimal("30"))
+        msg = "Cannot take snapshot while queue has a negative stock deficit"
+        with pytest.raises(ValueError, match=msg):
+            q.snapshot()
+

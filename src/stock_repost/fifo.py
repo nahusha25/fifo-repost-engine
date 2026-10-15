@@ -174,7 +174,17 @@ class FifoQueue:
         The result can be stored (e.g. on a
         :class:`~stock_repost.models.StockLedgerEntry`) and later
         restored via :meth:`from_snapshot`.
+
+        Raises:
+            ValueError: If the queue has a negative stock deficit, as
+                the snapshot format cannot represent a deficit.
         """
+        if self._negative_qty > Decimal("0"):
+            msg = (
+                f"Cannot take snapshot while queue has a negative stock deficit "
+                f"of {self._negative_qty}"
+            )
+            raise ValueError(msg)
         return tuple((layer.qty, layer.rate) for layer in self._layers)
 
     @classmethod

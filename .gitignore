@@ -14,6 +14,10 @@ build/
 # ruff
 .ruff_cache/
 
+# pytest & hypothesis
+.pytest_cache/
+.hypothesis/
+
 # IDE
 .vscode/
 .idea/
