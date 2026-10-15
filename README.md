@@ -8,6 +8,7 @@
 - **Reposting Design**: Employs a priority queue seeded from dirty ranges, per-entry immutable FIFO snapshots for snapshot-based rewind, early stopping gated strictly by `max_dirty`, and atomic rollback.
 - **Running Balance Problems on SLE**: Storing running balances on every SLE causes severe write amplification, database locking, concurrency deadlocks, partial failure corruption, snapshot bloat, and GL drift.
 - **Implementation Summary**: A standalone Python 3.11+ library using exact `Decimal` arithmetic, pure `FifoQueue` operations, immutable dataclasses, atomic `StockLedger`, and automated GL reconciliation.
+- **Layer Breakdown & Comparison**: See the [FIFO layer walkthrough](DESIGN.md#2-fifo-layer-walkthrough) and [FIFO vs moving average](DESIGN.md#3-fifo-vs-moving-average) sections in DESIGN.md.
 
 ---
 

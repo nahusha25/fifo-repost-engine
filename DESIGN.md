@@ -102,10 +102,57 @@ The `stock_repost` engine is structured into clean, decoupled, single-responsibi
 - **`repost.py`**: Core reposting engine featuring multi-key dirty seeding, snapshot rewind, early stopping, manufacturing dependency propagation, and atomic state swaps.
 - **`gl.py`**: Double-entry bookkeeping engine deriving balanced accounting vouchers from inventory valuation deltas.
 - **`report.py` & `cli.py`**: Visual presentation layer rendering before-and-after transaction comparisons, audit summaries, and GL balance verification.
+---
+
+## 2. FIFO Layer Walkthrough
+
+<a id="fifo-layer-walkthrough"></a>
+
+The step-by-step layer progression of the task scenario illustrates how inventory layers are tracked and consumed before and after a backdated edit.
+
+#### FIFO Layers Before Edit (`PR-01` Milk @ 60)
+
+| Step | Date | Voucher | Item | Movement | Remaining FIFO Layers `(qty @ rate)` | Ending Balance |
+|---|---|---|---|---|---|---|
+| Opening | 01 Jan | `OPEN-01` | Milk | +100 @ 50 | `[100 @ 50]` | 100 qty, 5,000 val |
+| 10 Jan PR | 10 Jan | `PR-01` | Milk | +50 @ 60 | `[100 @ 50, 50 @ 60]` | 150 qty, 8,000 val |
+| 15 Jan DN | 15 Jan | `DN-01` | Milk | -80 | `[20 @ 50, 50 @ 60]` | 70 qty, 4,000 val |
+| 20 Jan PR | 20 Jan | `PR-02` | Milk | +50 @ 60 | `[20 @ 50, 50 @ 60, 50 @ 60]` | 120 qty, 7,000 val |
+| 21 Jan MFG | 21 Jan | `MFG-01` | Milk<br>Milk Powder | -100<br>+10 @ 580 | Milk: `[20 @ 60]`<br>Milk Powder: `[10 @ 580]` | 20 qty Milk, 1,200 val<br>10 qty Powder, 5,800 val |
+| 25 Jan DN | 25 Jan | `DN-02` | Milk Powder | -10 | Milk: `[20 @ 60]`<br>Milk Powder: `[]` | 20 qty Milk, 1,200 val<br>0 qty Powder, 0 val |
+
+#### 10 Jan Layer at 80 and Resulting MFG Cost
+
+When `PR-01` (10 Jan) is edited from rate 60 to 80, the 10 Jan layer becomes `50 @ 80`. The resulting manufacturing cost for `MFG-01` is:
+
+| Layer / Source | Quantity | Rate | Cost |
+|---|---|---|---|
+| Opening (`OPEN-01`) | 20 | 50 | 1,000 |
+| 10 Jan PR (`PR-01`) | 50 | 80 | 4,000 |
+| 20 Jan PR (`PR-02`) | 30 | 60 | 1,800 |
+| **Total MFG Cost** | **100** | — | **6,800** |
+
+Calculation: $20 \times 50 + 50 \times 80 + 30 \times 60 = 6,800$.
+
+DN-01 consumes only the opening layer, so it cannot change.
 
 ---
 
-## 2. Bugs Found by Property Testing
+## 3. FIFO vs Moving Average
+
+<a id="fifo-vs-moving-average"></a>
+
+Under moving average the 15 Jan DN would change:
+- **Before edit**: $8,000 / 150 \times 80 = \text{about } 4,266.67$
+- **After the edit**: $9,000 / 150 \times 80 = 4,800$
+
+Under FIFO it stays at 4,000.
+
+This is why reposting under FIFO touches fewer entries' values: transactions that consume strictly from earlier, unaffected inventory layers retain their exact historical valuation, localizing the reposting effect only to entries that draw from the modified layer.
+
+---
+
+## 4. Bugs Found by Property Testing
 
 During automated property-based testing with Hypothesis across diverse transaction sequences, three critical edge-case bugs were discovered and resolved:
 
@@ -126,7 +173,7 @@ During automated property-based testing with Hypothesis across diverse transacti
 
 ---
 
-## 3. Known Limitations
+## 5. Known Limitations
 
 1. **Receipt Cancellation with Active Dependencies**:
    - The cancellation (removal) of a receipt that directly feeds an active manufacturing entry is not currently covered by property testing generators (property generators only cancel receipts with no downstream dependencies to ensure physical validity).
