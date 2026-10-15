@@ -7,10 +7,10 @@ This document provides a conceptual and architectural mapping between the standa
 | `stock_repost` Component | ERPNext Equivalent *(verify against ERPNext source)* | Description / Mapping |
 |---|---|---|
 | `RepostEngine.repost()` / `dirty_ranges` | `Repost Item Valuation` (DocType) *(verify against ERPNext source)* | Queued document representing pending repost tasks with item, warehouse, and timestamp boundaries. |
-| Replay loop in `RepostEngine.repost()` | `update_entries_after` in `stock_ledger.py` *(verify against ERPNext source)* | Iterates forward through chronological entries for an `(item, warehouse)` key, re-evaluating valuation rates and balances. |
+| Replay loop in `RepostEngine.repost()` | `repost_future_sle` in `stock_ledger.py` (which calls `update_entries_after`) *(verify against ERPNext source)* | Iterates forward through chronological entries for an `(item, warehouse)` key, re-evaluating valuation rates and balances. |
 | `FifoQueue.snapshot()` / `SLE.fifo_snapshot` | `stock_queue` field on `Stock Ledger Entry` *(verify against ERPNext source)* | Persisted FIFO state representation. ERPNext stores serialized JSON `[[qty, rate], ...]` *(verify against ERPNext source)*; `stock_repost` stores immutable tuples of `(qty, rate)` pairs. |
 | `SLE.depends_on` | `dependant_sle_voucher_detail_no` *(verify against ERPNext source)* | Links consumption of raw materials to the incoming receipt of finished goods in manufacturing vouchers. |
-| `stock_repost.gl.generate_gl_entries()` | `repost_future_sle_and_gle` *(verify against ERPNext source)* | Derives stock value delta per voucher and emits balanced General Ledger Entries for inventory and expense accounts. |
+| `stock_repost.gl.generate_gl_entries()` | GL entries are re-posted by Repost Item Valuation after the SLE repost (exact function name: verify against ERPNext source) | Derives stock value delta per voucher and emits balanced General Ledger Entries for inventory and expense accounts. |
 | `ledger.get_min_dirty(item, wh)` | `posting_date` / `posting_time` on `Repost Item Valuation` *(verify against ERPNext source)* | The timestamp boundary indicating from where recalculation and FIFO replay must begin. |
 | `ledger.get_max_dirty(item, wh)` | *No direct ERPNext equivalent* | Safety gate in `stock_repost` preventing early-stop optimization from halting before all backdated edits have been evaluated. |
 
@@ -37,8 +37,8 @@ This document provides a conceptual and architectural mapping between the standa
   2. The finished good's key is marked dirty at its posting datetime.
   3. The finished good key is enqueued into the `RepostEngine` work queue to propagate downstream valuation.
 
-### 5. `repost_future_sle_and_gle` vs. `stock_repost.gl`
-- **ERPNext**: Valuation changes require adjusting the accounting ledger in `tabGL Entry` *(verify against ERPNext source)*. ERPNext reconciles accounting balance against stock valuation using functions like `repost_future_sle_and_gle` *(verify against ERPNext source)*.
+### 5. GL Reposting vs. `stock_repost.gl`
+- **ERPNext**: Valuation changes require adjusting the accounting ledger in `tabGL Entry` *(verify against ERPNext source)*. In ERPNext, `repost_future_sle` (in `stock_ledger.py`, which calls `update_entries_after`) handles SLE replay, and GL entries are re-posted by Repost Item Valuation after the SLE repost (exact function name: verify against ERPNext source).
 - **`stock_repost`**: `stock_repost.gl.generate_gl_entries()` consumes a `RepostResult`, inspects stock value deltas (`val_after - val_before`) per voucher, and emits balanced double-entry accounting records:
   - **Purchase Receipts**: Dr `Stock In Hand`, Cr `Stock Received But Not Billed`.
   - **Delivery Notes**: Dr `Cost of Goods Sold`, Cr `Stock In Hand`.

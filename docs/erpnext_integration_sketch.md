@@ -25,7 +25,7 @@ def execute_repost(repost_doc):
     while not work_queue.empty():
         posting_datetime, item, warehouse = work_queue.pop()
 
-        # 3. Per item/warehouse replay (update_entries_after logic) (verify against ERPNext source)
+        # 3. Per item/warehouse replay: repost_future_sle (in stock_ledger.py, which calls update_entries_after) (verify against ERPNext source)
         prev_sle = get_previous_sle(item, warehouse, posting_datetime)
         fifo_queue = restore_fifo_queue(prev_sle.stock_queue)  # (verify against ERPNext source)
 
@@ -50,7 +50,7 @@ def execute_repost(repost_doc):
                 break
             save_sle(sle)
 
-    # 5. General Ledger reposting
-    repost_future_sle_and_gle(repost_doc)  # (verify against ERPNext source)
+    # 5. General Ledger reposting:
+    # GL entries are re-posted by Repost Item Valuation after the SLE repost (exact function name: verify against ERPNext source)
     repost_doc.status = "Completed"  # (verify against ERPNext source)
 ```
