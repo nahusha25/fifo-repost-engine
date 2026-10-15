@@ -397,6 +397,9 @@ class RepostEngine:
                                     dep, incoming_rate=new_rate
                                 )
                                 working_ledger.replace_entry(dep, updated_dep)
+                                working_ledger.record_dirty(
+                                    dep.item, dep.warehouse, dep.posting_datetime
+                                )
                                 _enqueue(
                                     work_queue,
                                     working_ledger,

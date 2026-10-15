@@ -3,8 +3,6 @@
 from datetime import datetime
 from decimal import Decimal
 
-import pytest
-
 from stock_repost.ledger import StockLedger
 from stock_repost.models import StockLedgerEntry
 from stock_repost.repost import RepostEngine
@@ -253,7 +251,6 @@ def _build_failing_base_ledger() -> StockLedger:
     return StockLedger(base_entries)
 
 
-@pytest.mark.xfail(strict=True, reason="known bug, see Phase 5.4")
 def test_regression_early_stop_dependent_interrupted_by_multi_edit() -> None:
     """Reproduce early_stop equivalence bug found by Hypothesis.
 
