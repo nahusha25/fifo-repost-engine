@@ -1,6 +1,6 @@
 # FIFO Repost Engine
 
-[![CI](https://github.com/<user>/<repo>/actions/workflows/ci.yml/badge.svg)](https://github.com/<user>/<repo>/actions/workflows/ci.yml)
+[![CI](https://github.com/nahusha25/fifo-repost-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/nahusha25/fifo-repost-engine/actions/workflows/ci.yml)
 
 ## Short Answers
 - **Affected Transactions**: Under FIFO the 15 Jan DN value does not change (4,000), but the Manufacture entry and the 25 Jan Powder DN do (+1,000 COGS); affected transactions span subsequent entries on the edited key plus downstream dependents.
